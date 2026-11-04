@@ -204,83 +204,96 @@ An operator, of which the policy looks only at C<..> and C<...>.
 
 sub applies_to { return 'PPI::Token::Operator' }
 
-=head3 violates
+my $is_operator = sub {
+    my ( $e, $content ) = @_;
+    return $e && $e->isa('PPI::Token::Operator') && $e->content eq $content;
+};
 
-One violation for each range that counts down in list context.
+my $binds_tighter = sub {
+    my ($operator) = @_;
+    my $precedence = precedence_of($operator);
+    return defined $precedence && $precedence < $RANGE;
+};
 
-=cut
+my $follows_word = sub {
+    my ( $e, $words ) = @_;
+    my $word = $e->sprevious_sibling;
+    return $word && $word->isa('PPI::Token::Word') && $words->{ $word->content } ? 1 : 0;
+};
 
-sub violates {
-    my ( $self, $elem ) = @_;
-    return () unless $RANGE_OPERATOR{ $elem->content };
+# The elements of the left operand of $elem, and the element before them.  An
+# element binds to the operand if it is a term, or an operator that binds
+# tighter than .., which is where Perl would end the operand.
+my $left_operand = sub {
+    my ($elem) = @_;
+    my @operand;
+    my $before = $elem->sprevious_sibling;
+    while ($before) {
+        my $binds = 1;
+        if ( $before->isa('PPI::Token::Operator') ) {
+            $binds = $binds_tighter->($before);
+        }
+        elsif ( $before->isa('PPI::Token::Structure') ) {
+            $binds = 0;
+        }
+        elsif ( $before->isa('PPI::Token::Word') ) {
+            my $after = $before->snext_sibling;
+            $binds = !$NOT_A_TERM{ $before->content }
+              && ( is_method_call($before) || is_perl_builtin_with_zero_and_or_one_arguments($before) || ( $after && $after->isa('PPI::Structure::List') ) );
+        }
+        elsif ( $before->isa('PPI::Structure::Block') ) {
 
-    my ( $left,  $before ) = _left_operand($elem);
-    my ( $right, $after )  = _right_operand($elem);
-    return () unless @$left && @$right;
-
-    # The condition of a ternary is in boolean context: a flip-flop.
-    return () if _is_question_mark($after);
-
-    my $gives = $self->_what_perl_gives( $left, $right );
-    return () unless defined $gives && _in_list_context( $elem, $before );
-
-    my $range = join q{ }, _source(@$left), $elem->content, _source(@$right);
-    return $self->violation( "$range $gives", $EXPL, $elem );
-}
-
-# What Perl gives for a range that counts down, as the end of the message, or
-# undef for a range that does what it looks like.
-sub _what_perl_gives {
-    my ( $self, $left_operand, $right_operand ) = @_;
-
-    my $left  = _literal(@$left_operand);
-    my $right = _literal(@$right_operand);
-    return unless defined $right;
-
-    if ( !defined $left ) {
-        return unless $right->{number};
-        my $end = int $right->{value};
-        return if $end < 0 || $end > $self->{_largest_end};
-        my $start = _source(@$left_operand);
-        return "gives an empty list when $start is more than $end";
+            # The block of map, grep or sort ends the operand: the list follows it.
+            $binds = !$follows_word->( $before, \%BLOCK_THEN_LIST );
+        }
+        last unless $binds;
+        unshift @operand, $before;
+        $before = $before->sprevious_sibling;
     }
+    return ( \@operand, $before );
+};
 
-    my ( $from, $to ) = ( $left->{value}, $right->{value} );
-    return unless defined $from && defined $to;
-    if ( _counts_by_numbers( $left, $right ) ) {
-        return unless looks_like_number($from) && looks_like_number($to);
-        return int $from > int $to ? 'gives an empty list' : undef;
+my $right_operand = sub {
+    my ($elem) = @_;
+    my @operand;
+    my $after = $elem->snext_sibling;
+    while ($after) {
+        my $binds = 1;
+        if ( $after->isa('PPI::Token::Operator') ) {
+            $binds = $binds_tighter->($after);
+        }
+        elsif ( $after->isa('PPI::Token::Structure') ) {
+            $binds = 0;
+        }
+        elsif ( $after->isa('PPI::Token::Word') ) {
+            $binds = !( $SCALAR_MODIFIER{ $after->content } || $LIST_MODIFIER{ $after->content } );
+        }
+        last unless $binds;
+        push @operand, $after;
+        $after = $after->snext_sibling;
     }
+    return ( \@operand, $after );
+};
 
-    return 'gives an empty list' if length $from > length $to;
-    return                       if length $from < length $to || $from le $to;
-
-    # The same length, and $from sorts after $to.  Perl counts up from $from
-    # by the magic increment, never meets $to, and stops before the first
-    # string that is longer.  A string that is not letters then digits does
-    # not increment, so Perl gives it alone.
-    return "gives only ('$from')" unless $from =~ m/\A[[:alpha:]]*[[:digit:]]*\z/xs;
-    my $last = join q{}, map { m/[[:digit:]]/xs ? q{9} : m/[[:upper:]]/xs ? q{Z} : q{z} } split m//xs, $from;
-    return "gives only ('$from')" if $last eq $from;
-    return "gives every string from '$from' up to '$last', and never reaches '$to'";
-}
-
-# Whether Perl counts this range by numbers, as pp_flop decides: a number at
-# either end, or two strings that look like numbers where the left one does not
-# start with 0.
-sub _counts_by_numbers {
-    my ( $left, $right ) = @_;
-    return 1 if $left->{number} || $right->{number};
-    return looks_like_number( $left->{value} ) && index( $left->{value}, q{0} ) != 0 && looks_like_number( $right->{value} );
-}
+# The source of a run of sibling elements, with the whitespace between them.
+my $source = sub {
+    my (@elements) = @_;
+    my ( $first, $last ) = @elements[ 0, -1 ];
+    my $text = q{};
+    for ( my $e = $first; $e; $e = $e->next_sibling ) {
+        $text .= $e->content;
+        last if $e == $last;
+    }
+    return $text;
+};
 
 # The value of an operand that is one literal, as { value => ..., number => 1 }
 # for a number and { value => ... } for a string, or undef for anything else.
-sub _literal {
+my $literal = sub {
     my (@operand) = @_;
 
     my $sign = 1;
-    if ( @operand == 2 && $operand[0]->isa('PPI::Token::Operator') && $operand[0]->content eq q{-} ) {
+    if ( @operand == 2 && $is_operator->( $operand[0], q{-} ) ) {
         $sign = -1;
         shift @operand;
     }
@@ -304,208 +317,165 @@ sub _literal {
         return { value => $string };
     }
     return;
-}
-
-# The elements of the left operand of $elem, and the element before them.  An
-# element binds to the operand if it is a term, or an operator that binds
-# tighter than .., which is where Perl would end the operand.
-sub _left_operand {
-    my ($elem) = @_;
-    my @operand;
-    my $before = $elem->sprevious_sibling;
-    while ( $before && _binds_on_the_left($before) ) {
-        unshift @operand, $before;
-        $before = $before->sprevious_sibling;
-    }
-    return ( \@operand, $before );
-}
-
-sub _right_operand {
-    my ($elem) = @_;
-    my @operand;
-    my $after = $elem->snext_sibling;
-    while ( $after && _binds_on_the_right($after) ) {
-        push @operand, $after;
-        $after = $after->snext_sibling;
-    }
-    return ( \@operand, $after );
-}
-
-sub _binds_tighter {
-    my ($operator) = @_;
-    my $precedence = precedence_of($operator);
-    return defined $precedence && $precedence < $RANGE;
-}
-
-sub _binds_on_the_left {
-    my ($e) = @_;
-    return _binds_tighter($e) if $e->isa('PPI::Token::Operator');
-    return 0                  if $e->isa('PPI::Token::Structure');
-
-    if ( $e->isa('PPI::Token::Word') ) {
-        return 0 if $NOT_A_TERM{ $e->content };
-        return 1 if is_method_call($e) || is_perl_builtin_with_zero_and_or_one_arguments($e);
-        my $after = $e->snext_sibling;
-        return $after && $after->isa('PPI::Structure::List') ? 1 : 0;
-    }
-
-    # The block of map, grep or sort ends the operand: the list follows it.
-    return !_follows_word( $e, \%BLOCK_THEN_LIST ) if $e->isa('PPI::Structure::Block');
-    return 1;
-}
-
-sub _binds_on_the_right {
-    my ($e) = @_;
-    return _binds_tighter($e)                                                    if $e->isa('PPI::Token::Operator');
-    return 0                                                                     if $e->isa('PPI::Token::Structure');
-    return !( $SCALAR_MODIFIER{ $e->content } || $LIST_MODIFIER{ $e->content } ) if $e->isa('PPI::Token::Word');
-    return 1;
-}
-
-sub _is_question_mark {
-    my ($e) = @_;
-    return $e && $e->isa('PPI::Token::Operator') && $e->content eq q{?};
-}
-
-# Whether the range at $elem, whose left operand starts after $before, is in
-# list context.  It walks out to the left, past a comma list, a ternary and a
-# bare parenthesised group, to the first thing that gives an expression a
-# context.  Where it cannot tell, the answer is no, so that a flip-flop is never
-# reported.
-sub _in_list_context {
-    my ( $elem, $before ) = @_;
-
-    while (1) {
-        if ( !$before ) {
-            my $group = _bare_group_holding($elem);
-            return _context_of_holder($elem) unless $group;
-
-            my ( undef, $after ) = _right_operand($group);
-            return 0 if _is_question_mark($after);
-            return 1 if _is_list_slice($group);
-
-            ( undef, $before ) = _left_operand($group);
-            $elem = $group;
-            next;
-        }
-
-        if ( $before->isa('PPI::Token::Operator') ) {
-            my $operator = $before->content;
-            return _is_list( $before->sprevious_sibling ) if $operator eq q{=};
-
-            # A range operator here ends an earlier range in the same list.
-            return 0 unless $LIST_SEPARATOR{$operator} || $RANGE_OPERATOR{$operator};
-            $elem = $before;
-            ( undef, $before ) = _left_operand($before);
-            next;
-        }
-
-        return _gives_a_list($before) if $before->isa('PPI::Token::Word');
-        return $before->isa('PPI::Structure::Block') ? 1 : 0;
-    }
-    return 0;
-}
+};
 
 # Whether a word gives list context to the expression after it.
-sub _gives_a_list {
+my $gives_a_list = sub {
     my ($word) = @_;
     my $name = $word->content;
     return 0 if $SCALAR_MODIFIER{$name};
     return 1 if $LIST_MODIFIER{$name} || $name eq 'return' || is_method_call($word);
     return 1 if is_perl_builtin_with_list_context($word);
     return is_perl_builtin($word) ? 0 : 1;
-}
+};
 
-# The parenthesised group that the statement of $elem is the start of, if the
-# group is an expression and not the list of a call or of a loop.
-sub _bare_group_holding {
-    my ($elem)    = @_;
-    my $statement = $elem->parent;
-    my $list      = $statement ? $statement->parent : undef;
-    return unless $list && $list->isa('PPI::Structure::List');
-    return if $list->parent->isa('PPI::Statement::Compound');
-
-    my $before = $list->sprevious_sibling;
-    return $list unless $before;
-    return if $before->isa('PPI::Token::Word');
-    return if $before->isa('PPI::Token::Operator') && $before->content eq q{->};
-    return if $before->isa('PPI::Token::Symbol')   && index( $before->content, q{&} ) == 0;
-    return $list;
-}
-
-# ( LIST )[ ... ], which PPI gives as a list and then a subscript, or a list
-# and then an anonymous array.
-sub _is_list_slice {
-    my ($group) = @_;
-    my $next = $group->snext_sibling;
-    return 0 unless $next && ( $next->isa('PPI::Structure::Subscript') || $next->isa('PPI::Structure::Constructor') );
-    return $next->start->content eq q{[} ? 1 : 0;
-}
-
-# The context that the structure around the statement of $elem gives it.
-sub _context_of_holder {
-    my ($elem)    = @_;
-    my $statement = $elem->parent;
-    my $holder    = $statement ? $statement->parent : undef;
-    return 0 unless $holder;
-
-    return 1                                      if $holder->isa('PPI::Structure::Constructor');
-    return _is_slice($holder)                     if $holder->isa('PPI::Structure::Subscript');
-    return _follows_word( $holder, \%LIST_BLOCK ) if $holder->isa('PPI::Structure::Block');
-    return 0 unless $holder->isa('PPI::Structure::List');
-
-    my $compound = $holder->parent;
-    return $compound->type eq 'foreach' ? 1 : 0 if $compound->isa('PPI::Statement::Compound');
-
-    # A call: _bare_group_holding has taken every list that is not one.
-    my $before = $holder->sprevious_sibling;
-    return $before->isa('PPI::Token::Word') ? _gives_a_list($before) : 1;
-}
-
-# Whether an element on the left of = takes a list: an array, a hash, a list
-# or a slice.
-sub _is_list {
+my $after_list_cast = sub {
     my ($e) = @_;
-    return 0 unless $e;
-    return 1 if $e->isa('PPI::Structure::List');
-    return 1 if $e->isa('PPI::Token::Symbol')                                         && $e->content =~ m/\A[\@%]/xs;
-    return 1 if ( $e->isa('PPI::Token::Symbol') || $e->isa('PPI::Structure::Block') ) && _after_list_cast($e);
-    return $e->isa('PPI::Structure::Subscript') ? _is_slice($e) : 0;
-}
+    my $cast = $e->sprevious_sibling;
+    return $cast && $cast->isa('PPI::Token::Cast') && $cast->content =~ m/\A[\@%]\z/xs ? 1 : 0;
+};
 
 # Whether a subscript takes a slice rather than one element: after an array or
 # a hash, after @{...} or %{...}, or after ->@ or ->%.
-sub _is_slice {
+my $is_slice = sub {
     my ($subscript) = @_;
     my $before = $subscript->sprevious_sibling;
     return 0 unless $before;
     return 1 if $before->isa('PPI::Token::Symbol') && $before->content =~ m/\A[\@%]/xs;
     return 1 if $before->isa('PPI::Token::Cast')   && $before->content =~ m/\A[\@%]\z/xs;
-    return $before->isa('PPI::Structure::Block') && _after_list_cast($before) ? 1 : 0;
-}
+    return $before->isa('PPI::Structure::Block') && $after_list_cast->($before) ? 1 : 0;
+};
 
-sub _after_list_cast {
-    my ($e) = @_;
-    my $cast = $e->sprevious_sibling;
-    return $cast && $cast->isa('PPI::Token::Cast') && $cast->content =~ m/\A[\@%]\z/xs ? 1 : 0;
-}
+# Whether the range at $at, whose left operand starts after $before, is in
+# list context.  It walks out to the left, past a comma list, a ternary and a
+# bare parenthesised group, to the first thing that gives an expression a
+# context.  Where it cannot tell, the answer is no, so that a flip-flop is never
+# reported.
+my $in_list_context = sub {    ## no critic (ProhibitSingleUseLexicalSubs) Inlined, it takes the score of violates past 40 for CognitiveComplexity.
+    my ( $at, $before ) = @_;
+    while (1) {
+        if ( !$before ) {
+            my $statement = $at->parent;
+            my $holder    = $statement ? $statement->parent : undef;
+            return 0 unless $holder;
 
-sub _follows_word {
-    my ( $e, $words ) = @_;
-    my $word = $e->sprevious_sibling;
-    return $word && $word->isa('PPI::Token::Word') && $words->{ $word->content } ? 1 : 0;
-}
+            return 1 if $holder->isa('PPI::Structure::Constructor');
+            return 0 if $holder->isa('PPI::Structure::Subscript') && !$is_slice->($holder);
+            return 1 if $holder->isa('PPI::Structure::Subscript');
+            return 0 if $holder->isa('PPI::Structure::Block') && !$follows_word->( $holder, \%LIST_BLOCK );
+            return 1 if $holder->isa('PPI::Structure::Block');
+            return 0 unless $holder->isa('PPI::Structure::List');
 
-# The source of a run of sibling elements, with the whitespace between them.
-sub _source {
-    my (@elements) = @_;
-    my ( $first, $last ) = @elements[ 0, -1 ];
-    my $source = q{};
-    for ( my $e = $first; $e; $e = $e->next_sibling ) {
-        $source .= $e->content;
-        last if $e == $last;
+            my $compound = $holder->parent;
+            return 0 if $compound->isa('PPI::Statement::Compound') && $compound->type ne 'foreach';
+            return 1 if $compound->isa('PPI::Statement::Compound');
+
+            # The list of a call: of a word, of a code reference, or of &name.
+            my $caller = $holder->sprevious_sibling;
+            return 0 if $caller && $caller->isa('PPI::Token::Word') && !$gives_a_list->($caller);
+            return 1 if $caller && ( $caller->isa('PPI::Token::Word') || $is_operator->( $caller, q{->} ) || ( $caller->isa('PPI::Token::Symbol') && index( $caller->content, q{&} ) == 0 ) );
+
+            # A bare group, which has the context of the place where it is.
+            my ( undef, $past ) = $right_operand->($holder);
+            return 0 if $is_operator->( $past, q{?} );
+
+            # ( LIST )[ ... ], which PPI gives as a list and then a subscript,
+            # or a list and then an anonymous array.
+            my $next = $holder->snext_sibling;
+            return 1 if $next && ( $next->isa('PPI::Structure::Subscript') || $next->isa('PPI::Structure::Constructor') ) && $next->start->content eq q{[};
+
+            ( undef, $before ) = $left_operand->($holder);
+            $at = $holder;
+            next;
+        }
+
+        if ( $is_operator->( $before, q{=} ) ) {
+
+            # An array, a hash, a list or a slice on the left takes a list.
+            my $lhs = $before->sprevious_sibling;
+            return 0 unless $lhs;
+            return 1 if $lhs->isa('PPI::Structure::List');
+            return 1 if $lhs->isa('PPI::Token::Symbol')                                           && $lhs->content =~ m/\A[\@%]/xs;
+            return 1 if ( $lhs->isa('PPI::Token::Symbol') || $lhs->isa('PPI::Structure::Block') ) && $after_list_cast->($lhs);
+            return 1 if $lhs->isa('PPI::Structure::Subscript')                                    && $is_slice->($lhs);
+            return 0;
+        }
+
+        if ( $before->isa('PPI::Token::Operator') ) {
+
+            # A range operator here ends an earlier range in the same list.
+            return 0 unless $LIST_SEPARATOR{ $before->content } || $RANGE_OPERATOR{ $before->content };
+            $at = $before;
+            ( undef, $before ) = $left_operand->($before);
+            next;
+        }
+
+        return 0 if $before->isa('PPI::Token::Word') && !$gives_a_list->($before);
+        return 1 if $before->isa('PPI::Token::Word') || $before->isa('PPI::Structure::Block');
+        return 0;
     }
-    return $source;
+    return 0;
+};
+
+=head3 violates
+
+One violation for each range that counts down in list context.
+
+=cut
+
+sub violates {
+    my ( $self, $elem ) = @_;
+    return () unless $RANGE_OPERATOR{ $elem->content };
+
+    my ( $left_elements,  $before ) = $left_operand->($elem);
+    my ( $right_elements, $after )  = $right_operand->($elem);
+    return () unless @$left_elements && @$right_elements;
+
+    # The condition of a ternary is in boolean context: a flip-flop.
+    return () if $is_operator->( $after, q{?} );
+
+    # What Perl gives for the range, as the end of the message.
+    my $left  = $literal->(@$left_elements);
+    my $right = $literal->(@$right_elements);
+    return () unless defined $right;
+    my $gives;
+    if ( !defined $left ) {
+        return () unless $right->{number};
+        my $end = int $right->{value};
+        return () if $end < 0 || $end > $self->{_largest_end};
+        $gives = 'gives an empty list when ' . $source->(@$left_elements) . " is more than $end";
+    }
+    else {
+        my ( $from, $to ) = ( $left->{value}, $right->{value} );
+        return () unless defined $from && defined $to;
+
+        # Perl counts by numbers, as pp_flop decides, with a number at either
+        # end, or two strings that look like numbers where the left one does
+        # not start with 0.
+        if ( $left->{number} || $right->{number} || ( looks_like_number($from) && index( $from, q{0} ) != 0 && looks_like_number($to) ) ) {
+            return () unless looks_like_number($from) && looks_like_number($to);
+            return () if int $from <= int $to;
+            $gives = 'gives an empty list';
+        }
+        elsif ( length $from > length $to ) {
+            $gives = 'gives an empty list';
+        }
+        else {
+            return () if length $from < length $to || $from le $to;
+
+            # The same length, and $from sorts after $to.  Perl counts up from
+            # $from by the magic increment, never meets $to, and stops before
+            # the first string that is longer.  A string that is not letters
+            # then digits does not increment, so Perl gives it alone.
+            my $last = $from =~ m/\A[[:alpha:]]*[[:digit:]]*\z/xs ? join q{}, map { m/[[:digit:]]/xs ? q{9} : m/[[:upper:]]/xs ? q{Z} : q{z} } split m//xs, $from : $from;
+            $gives = $last eq $from ? "gives only ('$from')" : "gives every string from '$from' up to '$last', and never reaches '$to'";
+        }
+    }
+
+    return () unless $in_list_context->( $elem, $before );
+
+    my $range = join q{ }, $source->(@$left_elements), $elem->content, $source->(@$right_elements);
+    return $self->violation( "$range $gives", $EXPL, $elem );
 }
 
 1;

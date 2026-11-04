@@ -13,9 +13,6 @@
 # generates, and a surname is in no dictionary.  The licence words below are
 # from the text weaver.ini puts in the COPYRIGHT section of every module.
 
-Baugh
-LLC
-Troglodyne
 accessor
 ACL
 addon
@@ -35,6 +32,7 @@ backends
 BackPAN
 backtick
 basename
+Baugh
 bugtracker
 checksummed
 checksumming
@@ -119,6 +117,7 @@ LDAP
 LDAPS
 LDIF
 lifecycle
+LLC
 lookups
 loopback
 lowercased
@@ -219,6 +218,7 @@ TLDs
 TLS
 TODO
 toolchain
+Troglodyne
 TXT
 udev
 UDP

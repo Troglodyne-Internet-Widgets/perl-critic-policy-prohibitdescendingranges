@@ -4,21 +4,23 @@ This file is the procedure for work in this repository.  The POD and the files
 named below say what the code is and how it is written.
 
 Perl-Critic-Policy-ValuesAndExpressions-ProhibitDescendingRanges is one
-Perl::Critic policy.  It reports a range such as `10 .. 1` in list context,
-because perl's `..` counts only up, and gives an empty list for it.
+Perl::Critic policy.  It reports a range such as `10 .. 1` in list context.
+The `..` operator of Perl counts only up, so it gives an empty list for that
+range.
 
 The rule lives in two files.
 `lib/Perl/Critic/Policy/ValuesAndExpressions/ProhibitDescendingRanges.pm` is
-the policy, and its POD is the specification.  `t/main.t` holds a table of
-snippets that must be reported and a table of snippets that must not.  A
+the policy, and its POD is the specification.  `t/main.t` holds tables of
+snippets that the policy must report and snippets that it must not report.  A
 change to the rule changes both files.
 
-In scalar context `..` is the flip-flop operator, and the policy must never
+In scalar context, `..` is the flip-flop operator, and the policy must never
 report it.  So the policy reports a range only where it can see list context.
-PPI gives a statement as a flat list of tokens, so the policy finds the ends of
-a range, and its context, by perl's precedence.  Read those subs before a
-change.  What perl gives for each kind of range was found by running perl, and
-the POD says what it found.  Run perl again before you change a case.
+PPI gives a statement as a flat list of tokens.  So the policy finds the ends
+of a range, and its context, by the precedence of the operators.  Read those
+subs before you change them.  The POD records what Perl gives for each kind of
+range, which was found by running Perl.  Run Perl again before you change a
+case.
 
 ## Read the code before you change it
 
@@ -68,7 +70,9 @@ Then run `podchecker` on each changed file.  Run `perl -Ilib -c` on each
 changed script that no test loads, because the tests do not compile it.
 
 The pre-commit hook does the rest.  It tidies the Perl that you staged, runs
-perlcritic on it, and runs the tests.  If a step fails, the hook stops the
+perlcritic on it, and runs the tests that the commit can break, which
+`tests-covering` chooses.  The post-commit hook keeps the records of
+`tests-covering` up to date, in the background.  If a step fails, the hook stops the
 commit and prints the reason.  Do not run `perltidy` or `perlcritic` yourself,
 and do not run the tests to decide whether a change is ready to commit.
 
@@ -81,12 +85,18 @@ prove -lv t/<file>.t
 
 Do the same to see a new test fail before you fix what it tests.
 
-In each clone that you commit from, install the hook once.  Git does not
-install it for you, and without the hook the tree drifts from its style:
+In each clone that you commit from, install both hooks once.  Git does not
+install them for you, and without the hooks the tree drifts from its style:
 
 ```
-cp git-hooks/pre-commit .git/hooks/
+cp git-hooks/pre-commit git-hooks/post-commit .git/hooks/
 ```
+
+A file that no test loads, such as a fixture, gets its tests from
+`.tests-covering-map.pl`.  A path that the map cannot place runs every test.
+If a commit runs every test but does not touch everything, the map probably
+needs a rule.  Add the rule in the same change, and name the tests that read
+the file.
 
 ## When something is slow
 
@@ -102,7 +112,7 @@ clear error.  Read it before the first release, not during it.
 
 ```
 dzil authordeps --missing | cpanm --notest
-dzil build && dzil test
+dzil build && dzil test --release
 ```
 
 ## Commits and pull requests
