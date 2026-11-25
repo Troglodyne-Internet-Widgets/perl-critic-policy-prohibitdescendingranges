@@ -143,7 +143,12 @@ from anywhere.
 
 =head3 supported_parameters
 
-C<largest_end>.
+C<largest_end>, as L</CONFIGURATION> describes it.
+
+Returns HashRef, the description of the parameter that Perl::Critic reads, as
+a list of one.
+
+    my ($largest_end) = $policy->supported_parameters;
 
 =cut
 
@@ -184,6 +189,10 @@ sub supported_parameters {
 
 High: the code runs, and a loop over the range does nothing.
 
+Returns Int, the C<$SEVERITY_HIGH> of L<Perl::Critic::Utils>.
+
+    my $severity = $policy->default_severity;
+
 =cut
 
 sub default_severity { return $SEVERITY_HIGH }
@@ -192,6 +201,10 @@ sub default_severity { return $SEVERITY_HIGH }
 
 C<bugs>.
 
+Returns the names of the themes, as a list.
+
+    my @themes = $policy->default_themes;
+
 =cut
 
 sub default_themes { return qw{bugs} }
@@ -199,6 +212,10 @@ sub default_themes { return qw{bugs} }
 =head3 applies_to
 
 An operator, of which the policy looks only at C<..> and C<...>.
+
+Returns Str, the class of PPI element.
+
+    my $class = $policy->applies_to;
 
 =cut
 
@@ -417,9 +434,20 @@ my $in_list_context = sub {    ## no critic (ProhibitSingleUseLexicalSubs) Inlin
     return 0;
 };
 
-=head3 violates
+=head3 violates($elem)
 
 One violation for each range that counts down in list context.
+
+=over 4
+
+=item elem - InstanceOf["PPI::Token::Operator"] - an operator, which is a range when it is C<..> or C<...>
+
+=back
+
+Returns the violations, as a list: a L<Perl::Critic::Violation> when C<elem>
+is a range that counts down in list context, and none otherwise.
+
+    my @violations = $policy->violates($operator);
 
 =cut
 
